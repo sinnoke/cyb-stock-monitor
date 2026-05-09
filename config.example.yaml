@@ -1,0 +1,28 @@
+futu:
+  host: "127.0.0.1"
+  port: 11111
+  market_prefix: "SZ"
+  kline_type: "K_1M"
+  autype: "QFQ"
+  subscribe_batch_size: 80
+  max_subscribe: 10
+
+universe:
+  source: "futu" # futu: 从富途基础信息过滤创业板；candidate: 按代码范围生成候选
+  selection: "random" # random: 从创业板中随机抽取；first: 按代码排序取前 N 个
+  random_seed: 20260509
+  # 创业板主要是 300、301 开头。candidate 模式会按代码范围生成候选。
+  prefixes: ["300", "301"]
+  start: 0
+  end: 999
+  # 富途当前订阅额度不足以覆盖全部创业板时，优先订阅 include_codes。
+  include_codes: []
+  exclude_codes: []
+
+rules:
+  history_days: 5
+  volume_multiple: 2.0
+  alert_cooldown_minutes: 3
+
+notify:
+  console: true

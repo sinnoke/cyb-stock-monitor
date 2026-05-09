@@ -1,0 +1,22 @@
+[project]
+name = "cyb-stock-monitor"
+version = "0.1.0"
+description = "创业板股票实时分钟K线异动监控"
+requires-python = ">=3.9"
+dependencies = [
+  "futu-api>=9.0",
+  "pydantic>=2.0",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+cyb-monitor = "cyb_monitor.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
