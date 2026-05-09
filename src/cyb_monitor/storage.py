@@ -7,6 +7,7 @@ import sqlite3
 import threading
 
 from .models import MinuteBar
+from .status import write_status
 
 
 class SQLiteMinuteBarStore:
@@ -16,23 +17,28 @@ class SQLiteMinuteBarStore:
         retention_days: int = 92,
         batch_size: int = 500,
         flush_interval_seconds: float = 1.0,
+        status_path: Path | None = None,
     ) -> None:
         self.path = path
         self.retention_days = retention_days
         self.batch_size = batch_size
         self.flush_interval_seconds = flush_interval_seconds
+        self.status_path = status_path
         self._queue: Queue[MinuteBar | None] = Queue()
         self._thread = threading.Thread(target=self._run, name="sqlite-minute-bar-store", daemon=True)
         self._last_prune_at: datetime | None = None
+        self._written_rows = 0
 
     def start(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
+        self._write_status("starting")
         self._thread.start()
 
     def stop(self) -> None:
         self._queue.put(None)
         self._thread.join(timeout=10)
+        self._write_status("stopped")
 
     def enqueue(self, bar: MinuteBar) -> None:
         self._queue.put(bar)
@@ -66,6 +72,7 @@ class SQLiteMinuteBarStore:
                 "CREATE INDEX IF NOT EXISTS idx_minute_bars_code_time ON minute_bars(code, time)"
             )
             conn.commit()
+        self._write_status("initialized")
 
     def _run(self) -> None:
         conn = sqlite3.connect(self.path)
@@ -137,6 +144,8 @@ class SQLiteMinuteBarStore:
             ],
         )
         conn.commit()
+        self._written_rows += len(batch)
+        self._write_status("running", last_flush_rows=len(batch))
         batch.clear()
 
     def _prune_if_due(self, conn: sqlite3.Connection) -> None:
@@ -151,3 +160,19 @@ class SQLiteMinuteBarStore:
         conn.execute("DELETE FROM minute_bars WHERE time < ?", (cutoff.strftime("%Y-%m-%d %H:%M:%S"),))
         conn.commit()
         self._last_prune_at = datetime.now()
+        self._write_status("running", last_prune_at=self._last_prune_at.strftime("%Y-%m-%d %H:%M:%S"))
+
+    def _write_status(self, state: str, **extra) -> None:
+        if self.status_path is None:
+            return
+        write_status(
+            self.status_path,
+            {
+                "state": state,
+                "db_path": str(self.path),
+                "retention_days": self.retention_days,
+                "queue_size": self._queue.qsize(),
+                "written_rows_since_start": self._written_rows,
+                **extra,
+            },
+        )

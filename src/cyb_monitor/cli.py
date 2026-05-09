@@ -16,7 +16,10 @@ from .notify import ConsoleNotifier
 from .realtime_cache import MinuteKlineCache, PeriodicKlineAnalyzer
 from .rules import AlertEngine
 from .storage import SQLiteMinuteBarStore
+from .status import write_status
 from .universe import build_candidate_codes
+from .volume_alert import SQLiteVolumeAlertRunner
+from .web_monitor import run_web_monitor
 
 
 def main() -> None:
@@ -32,6 +35,20 @@ def main() -> None:
     realtime_parser.add_argument("--top-n", type=int, default=10, help="每次分析打印成交量最高的前 N 只，默认 10")
     realtime_parser.add_argument("--db", default="data/minute_bars.sqlite3", help="SQLite 数据库路径")
     realtime_parser.add_argument("--retention-days", type=int, default=92, help="分钟K线保留天数，默认 92 天")
+    realtime_parser.add_argument("--status-dir", default="data/status", help="进程状态文件目录")
+    alert_parser = subparsers.add_parser("run-volume-alerts", help="每隔一段时间从 SQLite 扫描最近5根K线并触发放量报警")
+    alert_parser.add_argument("--db", default="data/minute_bars.sqlite3", help="SQLite 数据库路径")
+    alert_parser.add_argument("--status-dir", default="data/status", help="进程状态文件目录")
+    alert_parser.add_argument("--interval-seconds", type=int, default=300, help="扫描间隔，默认 300 秒")
+    alert_parser.add_argument("--workers", type=int, default=20, help="并行线程数，默认 20")
+    alert_parser.add_argument("--latest-bars", type=int, default=5, help="检查最新分钟K线数量，默认 5")
+    alert_parser.add_argument("--baseline-days", type=int, default=20, help="历史基准交易日数量，默认 20")
+    alert_parser.add_argument("--threshold", type=float, default=2.0, help="m/n 报警阈值，默认 2.0")
+    web_parser = subparsers.add_parser("web-monitor", help="启动本地 Web 控制台监控订阅、存储和报警进程")
+    web_parser.add_argument("--host", default="127.0.0.1", help="监听地址，默认 127.0.0.1")
+    web_parser.add_argument("--port", type=int, default=8088, help="监听端口，默认 8088")
+    web_parser.add_argument("--db", default="data/minute_bars.sqlite3", help="SQLite 数据库路径")
+    web_parser.add_argument("--status-dir", default="data/status", help="进程状态文件目录")
     scan_parser = subparsers.add_parser("scan-history-volume", help="验证历史1分钟成交量放大筛选逻辑")
     scan_parser.add_argument("--start", type=int, default=600001, help="起始股票代码，默认 600001")
     scan_parser.add_argument("--end", type=int, default=600999, help="结束股票代码，默认 600999")
@@ -92,13 +109,28 @@ def main() -> None:
         if args.max_subscribe is not None:
             config.futu.max_subscribe = args.max_subscribe
 
+        status_dir = Path(args.status_dir)
         cache = MinuteKlineCache(max_bars=args.cache_bars)
-        store = SQLiteMinuteBarStore(Path(args.db), retention_days=args.retention_days)
+        store = SQLiteMinuteBarStore(
+            Path(args.db),
+            retention_days=args.retention_days,
+            status_path=status_dir / "storage.json",
+        )
         analyzer = PeriodicKlineAnalyzer(
             cache,
             interval_seconds=args.interval_seconds,
             min_bars=args.cache_bars,
             top_n=args.top_n,
+            status_path=status_dir / "cache_analysis.json",
+        )
+        write_status(
+            status_dir / "realtime.json",
+            {
+                "state": "starting",
+                "max_subscribe": config.futu.max_subscribe,
+                "kline_type": config.futu.kline_type,
+                "db_path": args.db,
+            },
         )
         store.start()
         analyzer.start()
@@ -112,6 +144,15 @@ def main() -> None:
             config.rules,
             on_bar,
             on_baselines=None,
+            on_status=lambda payload: write_status(
+                status_dir / "realtime.json",
+                {
+                    "max_subscribe": config.futu.max_subscribe,
+                    "kline_type": config.futu.kline_type,
+                    "db_path": args.db,
+                    **payload,
+                },
+            ),
         )
         try:
             provider.run(
@@ -122,8 +163,27 @@ def main() -> None:
                 random_seed=config.universe.random_seed,
             )
         finally:
+            write_status(status_dir / "realtime.json", {"state": "stopped"})
             analyzer.stop()
             store.stop()
+        return
+
+    if args.command == "run-volume-alerts":
+        status_dir = Path(args.status_dir)
+        runner = SQLiteVolumeAlertRunner(
+            Path(args.db),
+            interval_seconds=args.interval_seconds,
+            workers=args.workers,
+            latest_bars=args.latest_bars,
+            baseline_days=args.baseline_days,
+            threshold=args.threshold,
+            status_path=status_dir / "alerts.json",
+        )
+        runner.run_forever()
+        return
+
+    if args.command == "web-monitor":
+        run_web_monitor(args.host, args.port, Path(args.db), Path(args.status_dir))
         return
 
     notifier = ConsoleNotifier()

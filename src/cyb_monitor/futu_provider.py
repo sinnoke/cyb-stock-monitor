@@ -10,6 +10,7 @@ from .models import MinuteBar
 
 BarCallback = Callable[[MinuteBar], None]
 BaselineCallback = Callable[[dict[str, int]], None]
+StatusCallback = Callable[[dict], None]
 
 
 class FutuMinuteKlineProvider:
@@ -19,11 +20,13 @@ class FutuMinuteKlineProvider:
         rules: RuleConfig,
         on_bar: BarCallback,
         on_baselines: BaselineCallback | None = None,
+        on_status: StatusCallback | None = None,
     ) -> None:
         self.config = config
         self.rules = rules
         self.on_bar = on_bar
         self.on_baselines = on_baselines
+        self.on_status = on_status
         self.quote_ctx = None
 
     def run(
@@ -39,6 +42,7 @@ class FutuMinuteKlineProvider:
 
         self.quote_ctx = OpenQuoteContext(host=self.config.host, port=self.config.port)
         self.quote_ctx.set_handler(self._build_handler())
+        self._emit_status(state="connected", host=self.config.host, port=self.config.port)
 
         codes = candidate_codes
         if prefer_futu_universe:
@@ -50,20 +54,35 @@ class FutuMinuteKlineProvider:
             )
             codes = _select_codes(codes, self.config.max_subscribe, selection, random_seed)
         print(f"prepared {len(codes)} codes for subscription")
+        self._emit_status(state="prepared", prepared_codes=len(codes))
 
         if self.on_baselines is not None:
             baselines = self._load_volume_baselines(codes)
             self.on_baselines(baselines)
 
         subtype = _resolve_futu_constant(SubType, self.config.kline_type)
+        subscribed_codes = 0
         for batch in _chunks(codes, self.config.subscribe_batch_size):
             ret, data = self.quote_ctx.subscribe(batch, [subtype], subscribe_push=True)
             if ret != RET_OK:
                 print(f"subscribe failed: {data}; batch size={len(batch)}")
+                self._emit_status(
+                    state="subscribe_failed",
+                    subscribed_codes=subscribed_codes,
+                    failed_batch_size=len(batch),
+                    error=str(data),
+                )
                 continue
+            subscribed_codes += len(batch)
             print(f"subscribed {len(batch)} codes")
+            self._emit_status(
+                state="subscribing",
+                subscribed_codes=subscribed_codes,
+                prepared_codes=len(codes),
+            )
 
         print("futu provider is running; press Ctrl+C to stop")
+        self._emit_status(state="running", subscribed_codes=subscribed_codes, prepared_codes=len(codes))
         try:
             import time
 
@@ -76,6 +95,7 @@ class FutuMinuteKlineProvider:
         if self.quote_ctx is not None:
             self.quote_ctx.close()
             self.quote_ctx = None
+        self._emit_status(state="closed")
 
     def _load_cyb_codes(self, prefixes: list[str]) -> list[str]:
         from futu import Market, RET_OK, SecurityType
@@ -144,6 +164,10 @@ class FutuMinuteKlineProvider:
                 return ret, data
 
         return Handler()
+
+    def _emit_status(self, **payload) -> None:
+        if self.on_status is not None:
+            self.on_status(payload)
 
 
 def _row_to_bar(row) -> MinuteBar:

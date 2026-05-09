@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from datetime import datetime
+from pathlib import Path
 import threading
 from typing import Callable
 
 from .models import MinuteBar
+from .status import write_status
 
 
 class MinuteKlineCache:
@@ -46,26 +48,31 @@ class PeriodicKlineAnalyzer:
         min_bars: int = 5,
         top_n: int = 10,
         analyze: Callable[[dict[str, list[MinuteBar]]], None] | None = None,
+        status_path: Path | None = None,
     ) -> None:
         self.cache = cache
         self.interval_seconds = interval_seconds
         self.min_bars = min_bars
         self.top_n = top_n
         self.analyze = analyze or self._default_analyze
+        self.status_path = status_path
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="kline-analyzer", daemon=True)
 
     def start(self) -> None:
+        self._write_status("starting")
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
         self._thread.join(timeout=5)
+        self._write_status("stopped")
 
     def _run(self) -> None:
         while not self._stop.wait(self.interval_seconds):
             snapshot = self.cache.snapshot(min_bars=self.min_bars)
             self.analyze(snapshot)
+            self._write_status("running", ready_codes=len(snapshot), cached_codes=self.cache.total_codes())
 
     def _default_analyze(self, snapshot: dict[str, list[MinuteBar]]) -> None:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -88,3 +95,17 @@ class PeriodicKlineAnalyzer:
                 f"last_{len(bars)}_volume={volume_sum}",
                 flush=True,
             )
+
+    def _write_status(self, state: str, **extra) -> None:
+        if self.status_path is None:
+            return
+        write_status(
+            self.status_path,
+            {
+                "state": state,
+                "interval_seconds": self.interval_seconds,
+                "min_bars": self.min_bars,
+                "top_n": self.top_n,
+                **extra,
+            },
+        )
